@@ -1,314 +1,479 @@
 /* ═══════════════════════════════════════════════════════
-   MOOVIT-LIKE TRANSIT APP  –  Application Logic
+   MOOVIT-LIKE TRANSIT APP  –  Real routing via OSRM + Nominatim
    ═══════════════════════════════════════════════════════ */
 
 'use strict';
 
-// ── Transit line color palette ──────────────────────────
-const LINE_COLORS = {
-  subway: { '4': '#00933C', '5': '#00933C', '6': '#00933C', 'A': '#0039A6', 'C': '#0039A6', 'E': '#0039A6', 'N': '#FCCC0A', 'Q': '#FCCC0A', 'R': '#FCCC0A', 'W': '#FCCC0A', '1': '#EE352E', '2': '#EE352E', '3': '#EE352E', 'L': '#A7A9AC', 'J': '#996633', 'Z': '#996633', '7': '#B933AD', 'B': '#FF6319', 'D': '#FF6319', 'F': '#FF6319', 'M': '#FF6319', 'G': '#6CBE45', 'default': '#0039A6' },
-  bus:    { 'M15': '#EE352E', 'M31': '#EE352E', 'M101': '#0039A6', 'B41': '#FF6319', 'B63': '#FF6319', 'Q32': '#FCCC0A', 'default': '#0039A6' },
-};
-function lineColor(type, name) {
-  return (LINE_COLORS[type]?.[name]) ?? (LINE_COLORS[type]?.default ?? '#555');
-}
+// ── API endpoints ───────────────────────────────────────
+const NOMINATIM   = 'https://nominatim.openstreetmap.org/search';
+const OSRM_DRIVE  = 'https://router.project-osrm.org/route/v1/driving';
+const OSRM_WALK   = 'https://routing.openstreetmap.de/routed-foot/route/v1/walking';
+const OSRM_BIKE   = 'https://routing.openstreetmap.de/routed-bike/route/v1/cycling';
 
-// ── Sample NYC route data ───────────────────────────────
-const SAMPLE_ROUTES = [
-  {
-    id: 0, best: true,
-    duration: 28, arriveIn: 28,
-    fare: 2.90, fareLabel: 'OMNY/MetroCard',
-    steps: [
-      { type: 'walk',   icon: 'directions_walk', label: 'Walk', duration: 5,  detail: 'Head south on 7th Ave' },
-      { type: 'subway', icon: 'directions_subway', name: '1',    duration: 18, detail: 'Times Sq – 42 St → Fulton St', stops: 7 },
-      { type: 'walk',   icon: 'directions_walk', label: 'Walk', duration: 5,  detail: 'Walk to Brooklyn Bridge' },
-    ]
-  },
-  {
-    id: 1, best: false,
-    duration: 34, arriveIn: 34,
-    fare: 2.90, fareLabel: 'OMNY/MetroCard',
-    steps: [
-      { type: 'walk',   icon: 'directions_walk', label: 'Walk', duration: 3, detail: 'Walk to 42 St & 5th Ave' },
-      { type: 'bus',    icon: 'directions_bus',   name: 'M15',  duration: 22, detail: '5th Ave → Fulton St', stops: 11 },
-      { type: 'walk',   icon: 'directions_walk', label: 'Walk', duration: 9,  detail: 'Walk along Frankfort St' },
-    ]
-  },
-  {
-    id: 2, best: false,
-    duration: 42, arriveIn: 42,
-    fare: 2.90, fareLabel: 'OMNY/MetroCard',
-    steps: [
-      { type: 'walk',   icon: 'directions_walk', label: 'Walk', duration: 4, detail: 'Walk to 42 St & 8th Ave' },
-      { type: 'subway', icon: 'directions_subway', name: 'A',   duration: 20, detail: 'Times Sq → Chambers St', stops: 3 },
-      { type: 'walk',   icon: 'directions_walk', label: 'Walk', duration: 4, detail: 'Walk to Bridge entrance' },
-    ]
-  },
-  {
-    id: 3, best: false,
-    duration: 55, arriveIn: 55,
-    fare: 0, fareLabel: 'Free',
-    steps: [
-      { type: 'bike',   icon: 'directions_bike', label: 'Bike', duration: 55, detail: 'Citi Bike ride via Manhattan Bridge' },
-    ]
-  },
+// ── Route mode config ────────────────────────────────────
+const MODES = [
+  { id: 'driving', label: 'נהיגה',    icon: 'directions_car',  color: '#2b5ce6', url: OSRM_DRIVE, dashArray: null    },
+  { id: 'walking', label: 'הליכה',    icon: 'directions_walk', color: '#2f9e44', url: OSRM_WALK,  dashArray: '6,5'  },
+  { id: 'cycling', label: 'אופניים',  icon: 'directions_bike', color: '#e67700', url: OSRM_BIKE,  dashArray: null    },
 ];
 
-// ── Stop data for map markers ───────────────────────────
-const STOPS = [
-  { lat: 40.7559, lng: -73.9871, name: 'Times Sq – 42 St', lines: ['1','2','3','N','Q','R','W','A','C','E','7'] },
-  { lat: 40.7484, lng: -73.9967, name: '34 St – Penn Station', lines: ['1','2','3','A','C','E'] },
-  { lat: 40.7128, lng: -74.0059, name: 'Fulton St', lines: ['A','C','2','3','4','5','J','Z'] },
-  { lat: 40.7282, lng: -73.9942, name: 'Canal St', lines: ['A','C','E','N','Q','R','W','6','J','Z'] },
-  { lat: 40.7456, lng: -73.9771, name: 'Grand Central – 42 St', lines: ['4','5','6','7','S'] },
-  { lat: 40.7614, lng: -73.9776, name: '51 St', lines: ['6'] },
-];
+// ── State ─────────────────────────────────────────────────
+let map, fromMarker, toMarker;
+let fromPlace = null;   // { lat, lng, name }
+let toPlace   = null;
+let routePolylines = {};   // { driving: L.polyline, walking: ..., cycling: ... }
+let activeMode = 'all';
+let computedRoutes = [];    // results from last search
 
-// ── Map init ────────────────────────────────────────────
-let map, fromMarker, toMarker, routePolylines = [], stopMarkers = [];
-
+// ── Map init ──────────────────────────────────────────────
 function initMap() {
-  map = L.map('map', { zoomControl: false }).setView([40.7389, -73.9968], 13);
+  map = L.map('map', { zoomControl: false }).setView([48.8566, 2.3522], 13); // Paris default
 
   L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-    subdomains: 'abcd',
-    maxZoom: 19
+    subdomains: 'abcd', maxZoom: 19,
   }).addTo(map);
 
-  // Zoom control top-right
   L.control.zoom({ position: 'topright' }).addTo(map);
 
-  addFromMarker([40.7559, -73.9871]);
-  addToMarker([40.7061, -73.9969]);
-  addStopMarkers();
-
-  // Sample route polyline
-  drawRouteLine([
-    [40.7559, -73.9871],
-    [40.7484, -73.9967],
-    [40.7380, -74.0000],
-    [40.7282, -73.9942],
-    [40.7128, -74.0059],
-  ], '#2b5ce6');
+  // click map → show coordinates + reverse geocode
+  map.on('click', onMapClick);
 }
 
-function makeIcon(color, iconName) {
+async function onMapClick(e) {
+  const { lat, lng } = e.latlng;
+  try {
+    const res = await fetch(
+      `${NOMINATIM}?lat=${lat}&lon=${lng}&format=json&addressdetails=1`,
+      { headers: { 'Accept-Language': 'en' } }
+    );
+    // Use reverse endpoint
+    const reverseUrl = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`;
+    const r2 = await fetch(reverseUrl, { headers: { 'Accept-Language': 'en' } });
+    const data = await r2.json();
+    const name = data.display_name?.split(',').slice(0, 2).join(', ') ?? `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+    document.getElementById('stopName').textContent = name;
+    document.getElementById('stopMeta').textContent = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+    document.getElementById('stopIcon').textContent = 'place';
+    document.getElementById('arrivalsList').innerHTML = `
+      <div class="autocomplete-item" style="cursor:default">
+        <span class="material-icons">my_location</span>
+        <div class="ac-text">
+          <div class="ac-name">Set as origin</div>
+        </div>
+      </div>
+      <div class="autocomplete-item" style="cursor:default">
+        <span class="material-icons">flag</span>
+        <div class="ac-text">
+          <div class="ac-name">Set as destination</div>
+        </div>
+      </div>
+    `;
+    // Wire up those quick-set buttons
+    const items = document.querySelectorAll('#arrivalsList .autocomplete-item');
+    items[0].style.cursor = 'pointer';
+    items[1].style.cursor = 'pointer';
+    items[0].onclick = () => { setPlace('from', { lat, lng, name }); closeStopPopup(); };
+    items[1].onclick = () => { setPlace('to',   { lat, lng, name }); closeStopPopup(); };
+    // update Hebrew labels
+    items[0].querySelector('.ac-name').textContent = 'הגדר כנקודת מוצא';
+    items[1].querySelector('.ac-name').textContent = 'הגדר כיעד';
+    document.getElementById('stopPopup').classList.add('visible');
+  } catch (_) { /* silent */ }
+}
+
+// ── Custom markers ────────────────────────────────────────
+function makeMarkerIcon(color, iconName) {
   return L.divIcon({
     className: '',
-    html: `<div style="background:${color};width:34px;height:34px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);display:flex;align-items:center;justify-content:center;box-shadow:0 3px 10px rgba(0,0,0,.3)">
+    html: `<div style="background:${color};width:36px;height:36px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);display:flex;align-items:center;justify-content:center;box-shadow:0 3px 10px rgba(0,0,0,.3)">
              <span class="material-icons" style="transform:rotate(45deg);color:white;font-size:18px">${iconName}</span>
            </div>`,
-    iconSize: [34, 34],
-    iconAnchor: [17, 34],
+    iconSize: [36, 36], iconAnchor: [18, 36], popupAnchor: [0, -38],
   });
 }
 
-function addFromMarker(latlng) {
-  if (fromMarker) map.removeLayer(fromMarker);
-  fromMarker = L.marker(latlng, { icon: makeIcon('#2b5ce6', 'radio_button_checked') })
-    .addTo(map).bindPopup('<b>Start:</b> Times Square, New York');
-}
-function addToMarker(latlng) {
-  if (toMarker) map.removeLayer(toMarker);
-  toMarker = L.marker(latlng, { icon: makeIcon('#e03131', 'place') })
-    .addTo(map).bindPopup('<b>Destination:</b> Brooklyn Bridge, New York');
+function placeMarker(type, latlng, name) {
+  if (type === 'from') {
+    if (fromMarker) map.removeLayer(fromMarker);
+    fromMarker = L.marker(latlng, { icon: makeMarkerIcon('#2b5ce6', 'radio_button_checked') })
+      .addTo(map).bindPopup(`<b>From:</b> ${name}`);
+  } else {
+    if (toMarker) map.removeLayer(toMarker);
+    toMarker = L.marker(latlng, { icon: makeMarkerIcon('#e03131', 'place') })
+      .addTo(map).bindPopup(`<b>To:</b> ${name}`);
+  }
 }
 
-function addStopMarkers() {
-  STOPS.forEach(stop => {
-    const m = L.circleMarker([stop.lat, stop.lng], {
-      radius: 7,
-      fillColor: '#2b5ce6',
-      color: 'white',
-      weight: 2,
-      fillOpacity: 1,
-    }).addTo(map);
-    m.on('click', () => showStopPopup(stop));
-    stopMarkers.push(m);
+function setPlace(type, place) {
+  if (type === 'from') {
+    fromPlace = place;
+    document.getElementById('fromInput').value = place.name;
+    placeMarker('from', [place.lat, place.lng], place.name);
+  } else {
+    toPlace = place;
+    document.getElementById('toInput').value = place.name;
+    placeMarker('to', [place.lat, place.lng], place.name);
+  }
+  if (fromPlace && toPlace) fitBothMarkers();
+}
+
+function fitBothMarkers() {
+  if (!fromPlace || !toPlace) return;
+  map.fitBounds([
+    [fromPlace.lat, fromPlace.lng],
+    [toPlace.lat, toPlace.lng],
+  ], { padding: [60, 60] });
+}
+
+// ── Nominatim autocomplete ────────────────────────────────
+let acTimers = {};
+
+function setupAutocomplete(inputId, dropdownId, type) {
+  const input = document.getElementById(inputId);
+  const drop  = document.getElementById(dropdownId);
+
+  input.addEventListener('input', () => {
+    clearTimeout(acTimers[type]);
+    const q = input.value.trim();
+    if (q.length < 3) { closeDrop(drop); return; }
+    drop.innerHTML = `<div class="autocomplete-loading"><span class="material-icons" style="font-size:16px;animation:spin .8s linear infinite">refresh</span> מחפש…</div>`;
+    drop.classList.add('open');
+    acTimers[type] = setTimeout(() => nominatimSearch(q, drop, type), 320);
   });
+
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeDrop(drop); input.blur(); }
+  });
+
+  document.addEventListener('click', e => {
+    if (!input.contains(e.target) && !drop.contains(e.target)) closeDrop(drop);
+  }, true);
 }
 
-function drawRouteLine(coords, color, dashed = false) {
+async function nominatimSearch(query, drop, type) {
+  try {
+    const url = `${NOMINATIM}?q=${encodeURIComponent(query)}&format=json&limit=5&addressdetails=1`;
+    const res  = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+    const data = await res.json();
+
+    if (!data.length) {
+      drop.innerHTML = `<div class="autocomplete-loading">לא נמצאו תוצאות</div>`;
+      return;
+    }
+
+    drop.innerHTML = data.map((r, i) => {
+      const parts = r.display_name.split(', ');
+      const name  = parts.slice(0, 2).join(', ');
+      const addr  = parts.slice(2).join(', ');
+      return `<div class="autocomplete-item" data-idx="${i}" role="option">
+        <span class="material-icons">${getPlaceIcon(r.type, r.class)}</span>
+        <div class="ac-text">
+          <div class="ac-name">${name}</div>
+          <div class="ac-addr">${addr}</div>
+        </div>
+      </div>`;
+    }).join('');
+
+    drop.querySelectorAll('.autocomplete-item').forEach((el, i) => {
+      el.addEventListener('mousedown', e => {
+        e.preventDefault();
+        const r    = data[i];
+        const name = r.display_name.split(', ').slice(0, 2).join(', ');
+        const place = { lat: parseFloat(r.lat), lng: parseFloat(r.lon), name, fullName: r.display_name };
+        setPlace(type, place);
+        closeDrop(drop);
+      });
+    });
+  } catch (_) {
+    drop.innerHTML = `<div class="autocomplete-loading">שגיאה – בדוק חיבור לאינטרנט</div>`;
+  }
+}
+
+function closeDrop(drop) { drop.classList.remove('open'); drop.innerHTML = ''; }
+
+function getPlaceIcon(type, cls) {
+  if (cls === 'railway' || type === 'station') return 'directions_transit';
+  if (cls === 'highway' || type === 'street') return 'turn_right';
+  if (cls === 'amenity' && type === 'restaurant') return 'restaurant';
+  if (cls === 'shop') return 'shopping_bag';
+  if (cls === 'tourism') return 'photo_camera';
+  if (cls === 'natural') return 'park';
+  return 'place';
+}
+
+// ── Routing ────────────────────────────────────────────────
+async function fetchRoute(mode) {
+  const { url } = mode;
+  const coords = `${fromPlace.lng},${fromPlace.lat};${toPlace.lng},${toPlace.lat}`;
+  // Request up to 3 alternative routes
+  const endpoint = `${url}/${coords}?overview=full&geometries=geojson&alternatives=3&steps=true`;
+  const res  = await fetch(endpoint);
+  const data = await res.json();
+  if (data.code !== 'Ok' || !data.routes?.length) throw new Error('No route');
+
+  // Return all alternatives, not just the first
+  return data.routes.map((r, i) => ({
+    id:          i === 0 ? mode.id : `${mode.id}_alt${i}`,
+    label:       i === 0 ? mode.label : `${mode.label} (${i + 1})`,
+    icon:        mode.icon,
+    color:       i === 0 ? mode.color : shadeColor(mode.color, i * 40),
+    dashArray:   i === 0 ? mode.dashArray : '8,5',
+    duration:    r.duration,
+    distance:    r.distance,
+    geometry:    r.legs[0]?.steps ?? null,
+    geojson:     r.geometry,
+  }));
+}
+
+// Lighten a hex color by amount
+function shadeColor(hex, amount) {
+  const num = parseInt(hex.replace('#', ''), 16);
+  const r = Math.min(255, (num >> 16) + amount);
+  const g = Math.min(255, ((num >> 8) & 0xff) + amount);
+  const b = Math.min(255, (num & 0xff) + amount);
+  return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+}
+
+async function searchRoutes() {
+  if (!fromPlace || !toPlace) {
+    showToast('יש לבחור נקודת מוצא ויעד.');
+    return;
+  }
+  if (fromPlace.lat === toPlace.lat && fromPlace.lng === toPlace.lng) {
+    showToast('נקודת המוצא והיעד זהות.');
+    return;
+  }
+
+  const btn = document.getElementById('searchBtn');
+  btn.classList.add('loading');
+  btn.querySelector('span').textContent = 'sync';
+
+  clearRouteLines();
+  computedRoutes = [];
+
+  // Parallel requests for all 3 modes, each may return multiple alternatives
+  const results = await Promise.allSettled(MODES.map(fetchRoute));
+
+  computedRoutes = results
+    .filter(r => r.status === 'fulfilled')
+    .flatMap(r => r.value);   // flatten alternatives into one list
+
+  btn.classList.remove('loading');
+  btn.querySelector('span').textContent = 'search';
+
+  if (!computedRoutes.length) {
+    showToast('לא נמצאו מסלולים. נסה מיקומים אחרים.');
+    return;
+  }
+
+  // Draw all polylines (dimmed), highlight first
+  computedRoutes.forEach((route, i) => drawRouteLine(route, i === 0));
+  renderRouteCards(computedRoutes);
+  fitBothMarkers();
+
+  // Update departure label
+  const depTime = getDepartureTime();
+  const depStr = depTime.toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' });
+  document.getElementById('departLabel').textContent =
+    departureMode === 'now' ? 'יציאה עכשיו' : `יציאה ב-${depStr}`;
+
+  // Expand results panel
+  const panel = document.getElementById('resultsPanel');
+  panel.classList.remove('collapsed');
+  document.getElementById('panelArrow').textContent = 'expand_more';
+}
+
+// ── Polylines ──────────────────────────────────────────────
+function drawRouteLine(route, active = false) {
+  const coords = route.geojson.coordinates.map(([lng, lat]) => [lat, lng]);
   const line = L.polyline(coords, {
-    color, weight: 5, opacity: .85,
-    dashArray: dashed ? '8,6' : null,
+    color:     active ? route.color : '#aaa',
+    weight:    active ? 5 : 3,
+    opacity:   active ? .9 : .45,
+    dashArray: route.dashArray,
   }).addTo(map);
-  routePolylines.push(line);
+  routePolylines[route.id] = line;
+}
+
+function highlightRoute(id) {
+  computedRoutes.forEach(r => {
+    const line = routePolylines[r.id];
+    if (!line) return;
+    if (r.id === id) {
+      line.setStyle({ color: r.color, weight: 5, opacity: .9, dashArray: r.dashArray });
+      line.bringToFront();
+    } else {
+      line.setStyle({ color: '#aaa', weight: 3, opacity: .45 });
+    }
+  });
 }
 
 function clearRouteLines() {
-  routePolylines.forEach(l => map.removeLayer(l));
-  routePolylines = [];
+  Object.values(routePolylines).forEach(l => map.removeLayer(l));
+  routePolylines = {};
 }
 
-// ── Time display ────────────────────────────────────────
-function updateTime() {
-  const now = new Date();
-  document.getElementById('currentTime').textContent =
-    now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-}
-
-// ── Route rendering ─────────────────────────────────────
-let activeFilter = 'all';
-
-function renderRoutes(routes) {
+// ── Route cards ────────────────────────────────────────────
+function renderRouteCards(routes) {
   const list = document.getElementById('routesList');
   list.innerHTML = '';
+  const now  = getDepartureTime();
 
-  const now = new Date();
-
-  routes.forEach(route => {
-    const arrive = new Date(now.getTime() + route.arriveIn * 60000);
-    const arriveStr = arrive.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-    const stepsHtml = route.steps.map((step, i) => {
-      const arr = [];
-      if (i > 0) arr.push(`<span class="step-arrow">›</span>`);
-
-      if (step.type === 'walk') {
-        arr.push(`<span class="step-chip walk"><span class="material-icons">${step.icon}</span></span>`);
-      } else {
-        const color = lineColor(step.type, step.name);
-        arr.push(`<span class="step-chip" style="background:${color}">
-          <span class="material-icons">${step.icon}</span>${step.name}
-        </span>`);
-      }
-      return arr.join('');
-    }).join('');
-
-    const fareText = route.fare > 0 ? `$${route.fare.toFixed(2)}` : 'Free';
+  routes.forEach((route, i) => {
+    const mins    = Math.round(route.duration / 60);
+    const km      = (route.distance / 1000).toFixed(1);
+    const arrive  = new Date(now.getTime() + route.duration * 1000);
+    const arrStr  = arrive.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
     const card = document.createElement('div');
-    card.className = `route-card${route.best ? ' best' : ''}`;
+    card.className = `route-card${i === 0 ? ' active' : ''}`;
+    card.dataset.id = route.id;
+    if (i === 0) card.classList.add('best');
+
     card.innerHTML = `
+      <div class="mode-icon-large" style="background:${route.color}18">
+        <span class="material-icons" style="color:${route.color}">${route.icon}</span>
+      </div>
       <div class="route-time-block">
-        <div class="route-duration">${route.duration}<span>min</span></div>
-        <div class="route-arrive">Arrive ${arriveStr}</div>
+        <div class="route-duration">${mins}<span>min</span></div>
+        <div class="route-arrive">Arrive ${arrStr}</div>
       </div>
       <div class="route-divider"></div>
       <div class="route-info">
-        <div class="route-steps">${stepsHtml}</div>
+        <div class="route-steps">
+          <span class="step-chip" style="background:${route.color}">
+            <span class="material-icons">${route.icon}</span>${route.label}
+          </span>
+        </div>
         <div class="route-detail-text">
-          <span class="material-icons small-icon">schedule</span>
-          Depart now · ${route.steps.length} step${route.steps.length > 1 ? 's' : ''}
+          <span class="material-icons small-icon">straighten</span>
+          ${km} ק"מ
         </div>
       </div>
-      <div class="route-fare">
-        <div class="fare-amount">${fareText}</div>
-        <div class="fare-label">${route.fareLabel}</div>
-      </div>
     `;
-    card.addEventListener('click', () => openRouteModal(route, arriveStr));
+
+    card.addEventListener('click', () => {
+      document.querySelectorAll('.route-card').forEach(c => c.classList.remove('active'));
+      card.classList.add('active');
+      highlightRoute(route.id);
+      openRouteModal(route, arrStr, mins, km);
+    });
+
     list.appendChild(card);
   });
 }
 
-// ── Filter routes ───────────────────────────────────────
-function filterRoutes(el, mode) {
+// ── Filter (show/hide cards by mode) ──────────────────────
+function filterMode(el, mode) {
   document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
   el.classList.add('active');
-  activeFilter = mode;
+  activeMode = mode;
 
-  let filtered = SAMPLE_ROUTES;
-  if (mode !== 'all') {
-    filtered = SAMPLE_ROUTES.filter(r => r.steps.some(s => s.type === mode));
-  }
-  renderRoutes(filtered);
-}
-
-// ── Search & swap ───────────────────────────────────────
-function searchRoutes() {
-  clearRouteLines();
-
-  // Animate: redraw sample route
-  drawRouteLine([
-    [40.7559, -73.9871],
-    [40.7484, -73.9967],
-    [40.7380, -74.0000],
-    [40.7282, -73.9942],
-    [40.7128, -74.0059],
-  ], '#2b5ce6');
-
-  // Expand results panel
-  document.getElementById('resultsPanel').classList.remove('collapsed');
-  document.getElementById('panelArrow').textContent = 'expand_more';
-
-  renderRoutes(SAMPLE_ROUTES);
-  map.flyTo([40.7350, -73.9970], 13, { duration: 1.2 });
-}
-
-function swapLocations() {
-  const from = document.getElementById('fromInput');
-  const to   = document.getElementById('toInput');
-  [from.value, to.value] = [to.value, from.value];
-
-  // Swap markers
-  const tmp = fromMarker.getLatLng();
-  fromMarker.setLatLng(toMarker.getLatLng());
-  toMarker.setLatLng(tmp);
-  addFromMarker(fromMarker.getLatLng());
-  addToMarker(toMarker.getLatLng());
-}
-
-function clearDestination() {
-  document.getElementById('toInput').value = '';
-}
-
-function locateMe() {
-  if (!navigator.geolocation) return;
-  navigator.geolocation.getCurrentPosition(pos => {
-    const latlng = [pos.coords.latitude, pos.coords.longitude];
-    addFromMarker(latlng);
-    map.setView(latlng, 15);
-    document.getElementById('fromInput').value = 'My Location';
+  document.querySelectorAll('.route-card').forEach(card => {
+    card.style.display = (mode === 'all' || card.dataset.id === mode) ? '' : 'none';
   });
+
+  // Also highlight the visible route on the map
+  if (mode !== 'all') highlightRoute(mode);
+  else if (computedRoutes.length) highlightRoute(computedRoutes[0].id);
 }
 
-// ── Results panel toggle ────────────────────────────────
-let panelExpanded = true;
-function toggleResults() {
-  panelExpanded = !panelExpanded;
-  const panel = document.getElementById('resultsPanel');
-  const arrow = document.getElementById('panelArrow');
-  panel.classList.toggle('collapsed', !panelExpanded);
-  arrow.textContent = panelExpanded ? 'expand_more' : 'expand_less';
-}
-
-// ── Route detail modal ──────────────────────────────────
-function openRouteModal(route, arriveStr) {
-  const now = new Date();
-
-  const timelineHtml = route.steps.map((step, i) => {
-    const color  = step.type === 'walk' ? '#64748b' : lineColor(step.type, step.name || step.label);
-    const label  = step.type === 'walk' ? `Walk ${step.duration} min` : `${step.name} · ${step.duration} min`;
-    const badgeTxt = step.type === 'walk' ? 'WALK' : step.name;
-    const stops  = step.stops ? `${step.stops} stops` : '';
-
-    const t = new Date(now.getTime() + route.steps.slice(0, i).reduce((s, x) => s + x.duration, 0) * 60000);
-    const timeStr = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-    return `
-      <div class="timeline-step">
-        <div class="timeline-dot" style="color:${color};"></div>
-        <div class="timeline-step-header">
-          <span class="timeline-step-badge" style="background:${color}">${badgeTxt}</span>
-          <span class="timeline-step-label">${label}</span>
-          <span class="timeline-step-time">${timeStr}</span>
-        </div>
-        <div class="timeline-step-sub">${step.detail}${stops ? ' · ' + stops : ''}</div>
-      </div>`;
-  }).join('');
-
+// ── Route detail modal ──────────────────────────────────────
+function openRouteModal(route, arrStr, mins, km) {
   document.getElementById('modalTitle').textContent =
-    `${route.duration} min · Arrive ${arriveStr}`;
+    `${route.label}  ·  ${mins} דק'  ·  ${km} ק"מ`;
+
+  const steps = route.geometry ?? [];
+  let timelineHtml = '';
+
+  if (steps.length) {
+    const now = getDepartureTime();
+    let elapsed = 0;
+    timelineHtml = steps
+      .filter(s => s.maneuver?.type !== 'depart' || s.name)
+      .slice(0, 18)
+      .map(step => {
+        const t = new Date(now.getTime() + elapsed * 1000);
+        elapsed += step.duration;
+        const tStr = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const stepKm = (step.distance / 1000).toFixed(2);
+        const stepMin = Math.round(step.duration / 60);
+        const name = step.name || humanizeManeuver(step.maneuver?.type);
+        return `
+          <div class="timeline-step">
+            <div class="timeline-dot" style="color:${route.color}"></div>
+            <div class="timeline-step-header">
+              <span class="timeline-step-badge" style="background:${route.color}">${humanizeManeuver(step.maneuver?.type)}</span>
+              <span class="timeline-step-label">${name}</span>
+              <span class="timeline-step-time">${tStr}</span>
+            </div>
+            <div class="timeline-step-sub">${stepKm} ק"מ · ~${stepMin} דק'</div>
+          </div>`;
+      }).join('');
+  } else {
+    timelineHtml = `<div class="empty-state"><span class="material-icons">route</span><p>פרטי שלב-אחר-שלב<br>לא זמינים למסלול זה.</p></div>`;
+  }
+
   document.getElementById('modalBody').innerHTML =
     `<div class="timeline">${timelineHtml}</div>`;
-
   document.getElementById('routeModal').classList.add('open');
 }
 
+function humanizeManeuver(type) {
+  const map = { 'turn': 'Turn', 'new name': 'Continue', 'depart': 'Start', 'arrive': 'Arrive',
+    'merge': 'Merge', 'on ramp': 'On-Ramp', 'off ramp': 'Off-Ramp', 'fork': 'Fork',
+    'end of road': 'End', 'roundabout': 'Roundabout', 'rotary': 'Rotary',
+    'roundabout turn': 'Exit', 'notification': 'Note', 'use lane': 'Use Lane' };
+  return map[type] ?? (type ?? '–');
+}
+
+// ── Swap locations ─────────────────────────────────────────
+function swapLocations() {
+  [fromPlace, toPlace] = [toPlace, fromPlace];
+  document.getElementById('fromInput').value = fromPlace?.name ?? '';
+  document.getElementById('toInput').value   = toPlace?.name  ?? '';
+  if (fromPlace) placeMarker('from', [fromPlace.lat, fromPlace.lng], fromPlace.name);
+  if (toPlace)   placeMarker('to',   [toPlace.lat,   toPlace.lng],   toPlace.name);
+  if (fromPlace && toPlace) fitBothMarkers();
+}
+
+function clearDestination() {
+  toPlace = null;
+  document.getElementById('toInput').value = '';
+  if (toMarker) { map.removeLayer(toMarker); toMarker = null; }
+  clearRouteLines();
+  document.getElementById('routesList').innerHTML =
+    `<div class="empty-state"><span class="material-icons">directions</span><p>הזן יעד כדי לראות מסלולים.</p></div>`;
+}
+
+// ── Locate me ──────────────────────────────────────────────
+function locateMe() {
+  if (!navigator.geolocation) { showToast('מיקום גיאוגרפי אינו נתמך.'); return; }
+  showToast('מאתר את מיקומך…');
+  navigator.geolocation.getCurrentPosition(async pos => {
+    const lat = pos.coords.latitude, lng = pos.coords.longitude;
+    try {
+      const r   = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`, { headers: { 'Accept-Language': 'en' } });
+      const d   = await r.json();
+      const name = d.display_name?.split(', ').slice(0, 2).join(', ') ?? 'My Location';
+      setPlace('from', { lat, lng, name });
+    } catch (_) {
+      setPlace('from', { lat, lng, name: 'My Location' });
+    }
+    map.setView([lat, lng], 15);
+  }, () => showToast('הגישה למיקום נדחתה.'));
+}
+
+// ── Results panel toggle ───────────────────────────────────
+let panelExpanded = true;
+function toggleResults() {
+  panelExpanded = !panelExpanded;
+  document.getElementById('resultsPanel').classList.toggle('collapsed', !panelExpanded);
+  document.getElementById('panelArrow').textContent = panelExpanded ? 'expand_more' : 'expand_less';
+}
+
+// ── Modal ──────────────────────────────────────────────────
 function closeModal(e) {
   if (!e || e.target === document.getElementById('routeModal')) {
     document.getElementById('routeModal').classList.remove('open');
@@ -317,75 +482,81 @@ function closeModal(e) {
 
 function startNavigation() {
   closeModal();
-  // Brief feedback
-  const btn = document.querySelector('.go-btn');
-  if (btn) { btn.textContent = 'Navigation started!'; setTimeout(() => {
-    btn.innerHTML = '<span class="material-icons">navigation</span> Start Navigation';
-  }, 2000); }
+  showToast('הניווט החל!');
 }
 
-// ── Stop popup ──────────────────────────────────────────
-function showStopPopup(stop) {
-  document.getElementById('stopName').textContent = stop.name;
-
-  const arrivals = stop.lines.slice(0, 4).map(line => {
-    const mins = Math.floor(Math.random() * 12) + 1;
-    const color = lineColor('subway', line);
-    const soon  = mins <= 3 ? ' soon' : '';
-    return `
-      <div class="arrival-row">
-        <span class="arrival-badge" style="background:${color}">${line}</span>
-        <span class="arrival-dest">${randomDest()}</span>
-        <span class="arrival-time${soon}">${mins} min</span>
-      </div>`;
-  }).join('');
-
-  document.getElementById('arrivalsList').innerHTML = arrivals;
-  document.getElementById('stopPopup').classList.add('visible');
-}
-
+// ── Stop popup ─────────────────────────────────────────────
 function closeStopPopup() {
   document.getElementById('stopPopup').classList.remove('visible');
 }
 
-function randomDest() {
-  const dests = ['Uptown & The Bronx', 'Downtown & Brooklyn', 'Queens', 'Staten Island Ferry', 'Flushing Main St', 'Far Rockaway'];
-  return dests[Math.floor(Math.random() * dests.length)];
-}
-
-// ── Bottom nav ──────────────────────────────────────────
+// ── Bottom nav ─────────────────────────────────────────────
 function setNav(el, section) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   el.classList.add('active');
-  if (section === 'map') return;
-  // Placeholder feedback for other tabs
-  showToast(section.charAt(0).toUpperCase() + section.slice(1) + ' coming soon!');
+  const tabNames = { lines: 'קווים', favorites: 'מועדפים', alerts: 'התראות', more: 'עוד' };
+  if (section !== 'map') showToast(`${tabNames[section] ?? section} – בקרוב!`);
 }
 
-// ── Toast ───────────────────────────────────────────────
+// ── Toast ──────────────────────────────────────────────────
 function showToast(msg) {
-  let toast = document.getElementById('toast');
-  if (!toast) {
-    toast = document.createElement('div');
-    toast.id = 'toast';
-    Object.assign(toast.style, {
+  let t = document.getElementById('toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'toast';
+    Object.assign(t.style, {
       position: 'fixed', bottom: '80px', left: '50%', transform: 'translateX(-50%)',
       background: '#1e293b', color: 'white', padding: '8px 18px',
       borderRadius: '20px', fontSize: '13px', fontWeight: '500',
-      zIndex: '9999', transition: 'opacity .3s',
+      zIndex: '9999', transition: 'opacity .3s', whiteSpace: 'nowrap',
     });
-    document.body.appendChild(toast);
+    document.body.appendChild(t);
   }
-  toast.textContent = msg;
-  toast.style.opacity = '1';
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => { toast.style.opacity = '0'; }, 2200);
+  t.textContent = msg;
+  t.style.opacity = '1';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.style.opacity = '0'; }, 2400);
 }
 
-// ── Init ────────────────────────────────────────────────
+// ── Clock ──────────────────────────────────────────────────
+function updateTime() {
+  const el = document.getElementById('currentTime');
+  if (el) el.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// ── Departure time ──────────────────────────────────────
+let departureMode = 'now'; // 'now' | 'later'
+
+function setDepart(el, mode) {
+  document.querySelectorAll('.depart-chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  departureMode = mode;
+  const ti = document.getElementById('departTime');
+  if (mode === 'later') {
+    ti.style.display = 'block';
+    // Default to 30 min from now
+    const d = new Date(Date.now() + 30 * 60000);
+    ti.value = d.toISOString().slice(0, 16);
+  } else {
+    ti.style.display = 'none';
+  }
+}
+
+function getDepartureTime() {
+  if (departureMode === 'now') return new Date();
+  const v = document.getElementById('departTime').value;
+  return v ? new Date(v) : new Date();
+}
+
+// ── Bootstrap ─────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   initMap();
+  setupAutocomplete('fromInput', 'fromDropdown', 'from');
+  setupAutocomplete('toInput',   'toDropdown',   'to');
   updateTime();
   setInterval(updateTime, 30000);
-  renderRoutes(SAMPLE_ROUTES);
+
+  // Initial empty state
+  document.getElementById('routesList').innerHTML =
+    `<div class="empty-state"><span class="material-icons">search</span><p>הזן שני מיקומים למעלה ולחץ<br><b>חפש מסלול</b> לצפייה במסלולים אמיתיים.</p></div>`;
 });

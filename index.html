@@ -1,70 +1,77 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="he" dir="rtl">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Moovit – Transit App</title>
+  <title>מוביט – אפליקציית תחבורה</title>
   <link rel="stylesheet" href="styles.css" />
   <!-- Leaflet map -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <!-- Material Icons -->
   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700&display=swap" rel="stylesheet" />
 </head>
 <body>
 
 <!-- ═══════════════════════════ TOP BAR ═══════════════════════════ -->
 <header class="top-bar">
   <div class="logo">
-    <span class="logo-icon">M</span>
-    <span class="logo-text">moovit</span>
+    <span class="logo-icon">מ</span>
+    <span class="logo-text">מוביט</span>
   </div>
   <div class="top-actions">
-    <button class="icon-btn" title="Notifications"><span class="material-icons">notifications_none</span></button>
-    <div class="avatar">JD</div>
+    <button class="icon-btn" title="התראות"><span class="material-icons">notifications_none</span></button>
+    <div class="avatar">משה</div>
   </div>
 </header>
 
 <!-- ═══════════════════════════ SEARCH PANEL ═══════════════════════ -->
 <div class="search-panel" id="searchPanel">
   <div class="search-fields">
-    <div class="search-row">
+    <div class="search-row" id="fromRow">
       <span class="dot dot-blue"></span>
-      <input type="text" id="fromInput" class="search-input" placeholder="From: Current Location" value="Times Square, New York" />
-      <button class="icon-btn small" onclick="locateMe()"><span class="material-icons">my_location</span></button>
+      <input type="text" id="fromInput" class="search-input" placeholder="מאיפה? הזן כתובת…" autocomplete="off" />
+      <button class="icon-btn small" onclick="locateMe()" title="השתמש במיקומי"><span class="material-icons">my_location</span></button>
     </div>
+    <div class="autocomplete-dropdown" id="fromDropdown"></div>
+
     <div class="search-divider">
       <div class="divider-line"></div>
       <button class="swap-btn" onclick="swapLocations()" title="Swap"><span class="material-icons">swap_vert</span></button>
     </div>
-    <div class="search-row">
+
+    <div class="search-row" id="toRow">
       <span class="dot dot-red"></span>
-      <input type="text" id="toInput" class="search-input" placeholder="Where to?" value="Brooklyn Bridge, New York" />
-      <button class="icon-btn small" id="clearTo" onclick="clearDestination()"><span class="material-icons">close</span></button>
+      <input type="text" id="toInput" class="search-input" placeholder="לאן? הזן יעד…" autocomplete="off" />
+      <button class="icon-btn small" onclick="clearDestination()"><span class="material-icons">close</span></button>
     </div>
+    <div class="autocomplete-dropdown" id="toDropdown"></div>
   </div>
 
   <div class="filter-row">
-    <button class="filter-chip active" data-mode="all" onclick="filterRoutes(this, 'all')">
-      <span class="material-icons">directions</span> All
+    <button class="filter-chip active" data-mode="all" onclick="filterMode(this,'all')">
+      <span class="material-icons">directions</span> הכל
     </button>
-    <button class="filter-chip" data-mode="bus" onclick="filterRoutes(this, 'bus')">
-      <span class="material-icons">directions_bus</span> Bus
+    <button class="filter-chip" data-mode="driving" onclick="filterMode(this,'driving')">
+      <span class="material-icons">directions_car</span> נהיגה
     </button>
-    <button class="filter-chip" data-mode="subway" onclick="filterRoutes(this, 'subway')">
-      <span class="material-icons">directions_subway</span> Subway
+    <button class="filter-chip" data-mode="walking" onclick="filterMode(this,'walking')">
+      <span class="material-icons">directions_walk</span> הליכה
     </button>
-    <button class="filter-chip" data-mode="walk" onclick="filterRoutes(this, 'walk')">
-      <span class="material-icons">directions_walk</span> Walk
-    </button>
-    <button class="filter-chip" data-mode="bike" onclick="filterRoutes(this, 'bike')">
-      <span class="material-icons">directions_bike</span> Bike
+    <button class="filter-chip" data-mode="cycling" onclick="filterMode(this,'cycling')">
+      <span class="material-icons">directions_bike</span> אופניים
     </button>
   </div>
 
-  <button class="search-btn" onclick="searchRoutes()">
-    <span class="material-icons">search</span> Get Directions
+  <div class="depart-row">
+    <button class="depart-chip active" onclick="setDepart(this,'now')">יציאה עכשיו</button>
+    <button class="depart-chip" onclick="setDepart(this,'later')">יציאה מאוחרת יותר</button>
+    <input type="datetime-local" id="departTime" class="depart-time-input" style="display:none" />
+  </div>
+
+  <button class="search-btn" id="searchBtn" onclick="searchRoutes()">
+    <span class="material-icons">search</span> חפש מסלול
   </button>
 </div>
 
@@ -77,10 +84,10 @@
 
   <div class="results-header">
     <div>
-      <div class="results-title">Best routes</div>
+      <div class="results-title">המסלולים הטובים ביותר</div>
       <div class="results-meta">
         <span class="material-icons small-icon">access_time</span>
-        Depart now · <span id="currentTime"></span>
+        <span id="departLabel">יציאה עכשיו</span> · <span id="currentTime"></span>
       </div>
     </div>
     <button class="icon-btn" onclick="toggleResults()">
@@ -95,23 +102,23 @@
 <nav class="bottom-nav">
   <button class="nav-item active" onclick="setNav(this, 'map')">
     <span class="material-icons">map</span>
-    <span>Map</span>
+    <span>מפה</span>
   </button>
   <button class="nav-item" onclick="setNav(this, 'lines')">
     <span class="material-icons">directions_transit</span>
-    <span>Lines</span>
+    <span>קווים</span>
   </button>
   <button class="nav-item" onclick="setNav(this, 'favorites')">
     <span class="material-icons">star_border</span>
-    <span>Favorites</span>
+    <span>מועדפים</span>
   </button>
   <button class="nav-item" onclick="setNav(this, 'alerts')">
     <span class="material-icons">warning_amber</span>
-    <span>Alerts</span>
+    <span>התראות</span>
   </button>
   <button class="nav-item" onclick="setNav(this, 'more')">
     <span class="material-icons">menu</span>
-    <span>More</span>
+    <span>עוד</span>
   </button>
 </nav>
 
@@ -125,19 +132,19 @@
     <div id="modalBody"></div>
     <div class="modal-footer">
       <button class="go-btn" onclick="startNavigation()">
-        <span class="material-icons">navigation</span> Start Navigation
+        <span class="material-icons">navigation</span> התחל ניווט
       </button>
     </div>
   </div>
 </div>
 
-<!-- ══════════════════════════ STOP POPUP ════════════════════════ -->
+<!-- ══════════════════════════ LOCATION INFO POPUP ════════════════ -->
 <div class="stop-popup" id="stopPopup">
   <div class="stop-popup-header">
-    <span class="material-icons">directions_bus</span>
+    <span class="material-icons" id="stopIcon">place</span>
     <div>
-      <div class="stop-name" id="stopName">34 St – Penn Station</div>
-      <div class="stop-meta">Bus Stop · Next arrivals</div>
+      <div class="stop-name" id="stopName">Location</div>
+      <div class="stop-meta" id="stopMeta">Tap map for details</div>
     </div>
     <button class="icon-btn small" onclick="closeStopPopup()"><span class="material-icons">close</span></button>
   </div>

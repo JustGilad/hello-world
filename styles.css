@@ -25,7 +25,7 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-  font-family: 'Inter', system-ui, sans-serif;
+  font-family: 'Heebo', 'Inter', system-ui, sans-serif;
   background: var(--bg);
   color: var(--text-main);
   height: 100dvh;
@@ -166,6 +166,31 @@ body {
   border-color: var(--blue-main);
   color: white;
 }
+
+/* Depart row */
+.depart-row {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 10px;
+}
+.depart-chip {
+  padding: 5px 12px;
+  border-radius: 16px;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  font-size: 12px; font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer; font-family: inherit;
+  transition: all .2s;
+}
+.depart-chip.active {
+  background: var(--blue-dark); border-color: var(--blue-dark); color: white;
+}
+.depart-time-input {
+  flex: 1; border: 1.5px solid var(--border); border-radius: var(--radius-sm);
+  padding: 5px 8px; font-size: 12px; font-family: inherit;
+  color: var(--text-main); outline: none;
+  background: var(--bg);
+}
+.depart-time-input:focus { border-color: var(--blue-main); }
 
 .search-btn {
   width: 100%;
@@ -531,6 +556,91 @@ body {
   box-shadow: var(--shadow-md);
 }
 .leaflet-popup-content { font-size: 13px; margin: 10px 14px; }
+
+/* ─────────────────────────────────────────────────────
+   AUTOCOMPLETE DROPDOWN
+───────────────────────────────────────────────────── */
+.autocomplete-dropdown {
+  display: none;
+  position: relative;
+  z-index: 950;
+  background: var(--surface);
+  border: 1.5px solid var(--blue-main);
+  border-top: none;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  max-height: 200px;
+  overflow-y: auto;
+  margin-top: -2px;
+}
+.autocomplete-dropdown.open { display: block; }
+
+.autocomplete-item {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--bg);
+  transition: background .15s;
+}
+.autocomplete-item:last-child { border-bottom: none; }
+.autocomplete-item:hover { background: var(--blue-light); }
+.autocomplete-item .material-icons {
+  color: var(--text-muted); font-size: 18px; margin-top: 1px; flex-shrink: 0;
+}
+.ac-text { flex: 1; }
+.ac-name  { font-size: 13px; font-weight: 600; line-height: 1.3; }
+.ac-addr  { font-size: 11px; color: var(--text-muted); margin-top: 1px; }
+
+.autocomplete-loading {
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--text-muted);
+  display: flex; align-items: center; gap: 8px;
+}
+
+/* ─────────────────────────────────────────────────────
+   SEARCH BUTTON LOADING STATE
+───────────────────────────────────────────────────── */
+.search-btn.loading {
+  pointer-events: none;
+  opacity: .75;
+}
+.search-btn.loading .material-icons {
+  animation: spin .8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─────────────────────────────────────────────────────
+   ROUTE CARD ACTIVE STATE
+───────────────────────────────────────────────────── */
+.route-card.active {
+  background: var(--blue-light);
+  border-left: 3px solid var(--blue-main);
+}
+
+/* ─────────────────────────────────────────────────────
+   EMPTY / ERROR STATE
+───────────────────────────────────────────────────── */
+.empty-state {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.empty-state .material-icons { font-size: 40px; margin-bottom: 8px; display: block; }
+.empty-state p { font-size: 13px; line-height: 1.5; }
+
+/* ─────────────────────────────────────────────────────
+   DISTANCE / MODE INFO BADGE
+───────────────────────────────────────────────────── */
+.mode-icon-large {
+  width: 44px; height: 44px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.mode-icon-large .material-icons { font-size: 22px; }
 
 /* ─────────────────────────────────────────────────────
    RESPONSIVE
