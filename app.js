@@ -285,15 +285,26 @@ function haversineM(lat1, lng1, lat2, lng2) {
 }
 
 async function findNearestStop(lat, lng, osmStopTag, radius) {
-  const query = `[out:json][timeout:12];node[${osmStopTag}](around:${radius},${lat},${lng});out body 10;`;
-  const res = await fetch(OVERPASS, {
-    method: 'POST', body: 'data=' + encodeURIComponent(query),
-  });
-  const data = await res.json();
-  if (!data.elements?.length) return null;
-  return data.elements.sort((a, b) =>
-    haversineM(lat, lng, a.lat, a.lon) - haversineM(lat, lng, b.lat, b.lon)
-  )[0];
+  try {
+    const query = `[out:json][timeout:10];node[${osmStopTag}](around:${radius},${lat},${lng});out body 10;`;
+    const res = await fetch(OVERPASS, {
+      method: 'POST', body: 'data=' + encodeURIComponent(query),
+    });
+    const data = await res.json();
+    if (!data.elements?.length) return null;
+    return data.elements.sort((a, b) =>
+      haversineM(lat, lng, a.lat, a.lon) - haversineM(lat, lng, b.lat, b.lon)
+    )[0];
+  } catch { return null; }
+}
+
+// Place a virtual stop 350 m toward the other endpoint (fallback when Overpass unavailable)
+function virtualStop(lat, lng, targetLat, targetLng, name) {
+  const OFFSET = 350;
+  const bearing = Math.atan2(targetLng - lng, targetLat - lat);
+  const dlat = OFFSET * Math.cos(bearing) / 111320;
+  const dlng = OFFSET * Math.sin(bearing) / (111320 * Math.cos(lat * Math.PI / 180));
+  return { lat: lat + dlat, lon: lng + dlng, tags: { name }, isVirtual: true };
 }
 
 // Uses Overpass set-intersection to find routes that serve BOTH areas
@@ -313,58 +324,66 @@ async function findConnectingRoute(routeType, fromLat, fromLng, toLat, toLng, ra
 }
 
 async function fetchWalkingLeg(from, to) {
-  const coords = `${from.lng},${from.lat};${to.lng},${to.lat}`;
-  const res = await fetch(`${OSRM_WALK}/${coords}?overview=full&geometries=geojson&steps=false`);
-  const data = await res.json();
-  if (data.code !== 'Ok' || !data.routes?.length) throw new Error('no walk route');
-  const r = data.routes[0];
-  return { duration: r.duration, distance: r.distance, geojson: r.geometry };
+  try {
+    const coords = `${from.lng},${from.lat};${to.lng},${to.lat}`;
+    const res = await fetch(`${OSRM_WALK}/${coords}?overview=full&geometries=geojson&steps=false`);
+    const data = await res.json();
+    if (data.code !== 'Ok' || !data.routes?.length) throw new Error();
+    const r = data.routes[0];
+    return { duration: r.duration, distance: r.distance, geojson: r.geometry };
+  } catch {
+    // Fallback: straight-line at 1.2 m/s
+    const dist = haversineM(from.lat, from.lng, to.lat, to.lng);
+    return { duration: dist / 1.2, distance: dist, geojson: null };
+  }
 }
 
 async function fetchTransitRoute(mode) {
   const directDist = haversineM(fromPlace.lat, fromPlace.lng, toPlace.lat, toPlace.lng);
   if (directDist < mode.minDistM) throw new Error('too close for transit');
 
-  // Run stop lookup + route-intersection lookup in parallel
-  const [fromStop, toStop, connectingRoute] = await Promise.all([
+  // Try real Overpass data; fall back to virtual stops if unavailable
+  let fromStop = null, toStop = null, connectingRoute = null, isEstimated = false;
+  [fromStop, toStop, connectingRoute] = await Promise.all([
     findNearestStop(fromPlace.lat, fromPlace.lng, mode.osmStopTag, mode.searchRadius),
     findNearestStop(toPlace.lat,   toPlace.lng,   mode.osmStopTag, mode.searchRadius),
     mode.osmRouteType
       ? findConnectingRoute(mode.osmRouteType,
           fromPlace.lat, fromPlace.lng, toPlace.lat, toPlace.lng, mode.searchRadius)
-      : Promise.resolve(null),
+      : null,
   ]);
-  if (!fromStop || !toStop) throw new Error('no stops found');
-  if (fromStop.id === toStop.id) throw new Error('same stop');
+
+  // Use virtual stops when Overpass returned nothing or same stop
+  if (!fromStop || !toStop || fromStop.id === toStop.id) {
+    isEstimated = true;
+    fromStop = virtualStop(fromPlace.lat, fromPlace.lng, toPlace.lat, toPlace.lng, 'תחנה קרובה');
+    toStop   = virtualStop(toPlace.lat,   toPlace.lng,   fromPlace.lat, fromPlace.lng, 'תחנה יעד');
+  }
 
   const transitDistM = haversineM(fromStop.lat, fromStop.lon, toStop.lat, toStop.lon);
-  if (transitDistM < 500) throw new Error('stops too close');
 
   const [walk1, walk2] = await Promise.all([
     fetchWalkingLeg(fromPlace, { lat: fromStop.lat, lng: fromStop.lon }),
     fetchWalkingLeg({ lat: toStop.lat, lng: toStop.lon }, toPlace),
   ]);
 
-  const transitSec = transitDistM / (mode.avgSpeedKmh * 1000 / 3600);
-  const totalDur   = walk1.duration + mode.waitSec + transitSec + walk2.duration;
-  const totalDist  = walk1.distance + transitDistM + walk2.distance;
+  const transitSec   = transitDistM / (mode.avgSpeedKmh * 1000 / 3600);
+  const totalDur     = walk1.duration + mode.waitSec + transitSec + walk2.duration;
+  const totalDist    = walk1.distance + transitDistM + walk2.distance;
 
-  const fromName = fromStop.tags?.name ?? fromStop.tags?.['name:he'] ?? 'תחנה';
-  const toName   = toStop.tags?.name   ?? toStop.tags?.['name:he']   ?? 'תחנה';
+  const fromName = fromStop.tags?.name ?? 'תחנה';
+  const toName   = toStop.tags?.name   ?? 'תחנה';
 
-  // Extract line info from connecting route if found
-  const rt = connectingRoute?.tags ?? {};
-  const lineRef      = rt.ref      ?? rt.name?.match(/\d+/)?.[0] ?? null;
+  const rt           = connectingRoute?.tags ?? {};
+  const lineRef      = rt.ref ?? rt.name?.match(/\d+/)?.[0] ?? null;
   const lineOperator = rt.operator ?? rt.network ?? null;
-  const lineColor    = rt.colour   ?? rt.color   ?? null;
-
-  const transitColor = lineColor ? normalizeOsmColor(lineColor) : mode.color;
+  const lineColor    = rt.colour ?? rt.color ?? null;
+  const transitColor = (lineColor && normalizeOsmColor(lineColor)) ?? mode.color;
 
   return {
     id: mode.id, label: mode.label, icon: mode.icon,
-    color: transitColor, dashArray: null, isTransit: true,
-    duration: totalDur, distance: totalDist,
-    lineRef, lineOperator,
+    color: transitColor, dashArray: null, isTransit: true, isEstimated,
+    duration: totalDur, distance: totalDist, lineRef, lineOperator,
     legs: [
       { type: 'walk',   duration: walk1.duration, distance: walk1.distance, geojson: walk1.geojson, toName: fromName },
       { type: mode.id,  duration: transitSec + mode.waitSec, distance: transitDistM,
@@ -527,7 +546,9 @@ function renderRouteCards(routes) {
 
     const fareHtml = route.taxiFare
       ? `<span class="fare-badge">~₪${route.taxiFare}</span>`
-      : '';
+      : route.isEstimated
+        ? `<span class="estimated-badge">משוער</span>`
+        : '';
 
     card.innerHTML = `
       <div class="mode-icon-large" style="background:${route.color}18">
