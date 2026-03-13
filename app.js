@@ -13,22 +13,33 @@ const OVERPASS    = 'https://overpass-api.de/api/interpreter';
 
 // ── Road route mode config ───────────────────────────────
 const MODES = [
-  { id: 'driving', label: 'נהיגה',    icon: 'directions_car',  color: '#2b5ce6', url: OSRM_DRIVE, dashArray: null   },
-  { id: 'walking', label: 'הליכה',    icon: 'directions_walk', color: '#2f9e44', url: OSRM_WALK,  dashArray: '6,5' },
-  { id: 'cycling', label: 'אופניים',  icon: 'directions_bike', color: '#e67700', url: OSRM_BIKE,  dashArray: null   },
+  { id: 'driving', label: 'נהיגה',   icon: 'directions_car',  color: '#2b5ce6', url: OSRM_DRIVE, dashArray: null   },
+  { id: 'walking', label: 'הליכה',   icon: 'directions_walk', color: '#2f9e44', url: OSRM_WALK,  dashArray: '6,5' },
+  { id: 'cycling', label: 'אופניים', icon: 'directions_bike', color: '#e67700', url: OSRM_BIKE,  dashArray: null   },
+  { id: 'taxi',    label: 'מונית',   icon: 'local_taxi',      color: '#ca8a04', url: OSRM_DRIVE, dashArray: null, isTaxi: true },
 ];
 
 // ── Transit mode config ──────────────────────────────────
 const TRANSIT_MODES = [
   {
-    id: 'train', label: 'רכבת', icon: 'directions_railway', color: '#7c3aed',
-    osmTag: '"railway"="station"', searchRadius: 6000,
-    avgSpeedKmh: 70, waitSec: 720, minDistM: 8000,
+    id: 'train',      label: 'רכבת',              icon: 'directions_railway', color: '#7c3aed',
+    osmStopTag: '"railway"="station"',  osmRouteType: 'train',
+    searchRadius: 6000, avgSpeedKmh: 70,  waitSec: 720, minDistM: 8000,
   },
   {
-    id: 'tram', label: 'רכבת קלה', icon: 'tram', color: '#0891b2',
-    osmTag: '"railway"="tram_stop"', searchRadius: 2500,
-    avgSpeedKmh: 20, waitSec: 480, minDistM: 1500,
+    id: 'tram',       label: 'רכבת קלה',           icon: 'tram',              color: '#0891b2',
+    osmStopTag: '"railway"="tram_stop"', osmRouteType: 'tram',
+    searchRadius: 2500, avgSpeedKmh: 20,  waitSec: 480, minDistM: 1500,
+  },
+  {
+    id: 'bus',        label: 'אוטובוס',            icon: 'directions_bus',    color: '#16a34a',
+    osmStopTag: '"highway"="bus_stop"',  osmRouteType: 'bus',
+    searchRadius: 700,  avgSpeedKmh: 22,  waitSec: 360, minDistM: 800,
+  },
+  {
+    id: 'bus_express', label: 'אוטובוס בינעירוני', icon: 'airport_shuttle',   color: '#b45309',
+    osmStopTag: '"highway"="bus_stop"',  osmRouteType: 'bus',
+    searchRadius: 3000, avgSpeedKmh: 80,  waitSec: 600, minDistM: 20000,
   },
 ];
 
@@ -227,7 +238,6 @@ async function fetchRoute(mode) {
   const data = await res.json();
   if (data.code !== 'Ok' || !data.routes?.length) throw new Error('No route');
 
-  // Return all alternatives, not just the first
   return data.routes.map((r, i) => ({
     id:          i === 0 ? mode.id : `${mode.id}_alt${i}`,
     label:       i === 0 ? mode.label : `${mode.label} (${i + 1})`,
@@ -238,7 +248,19 @@ async function fetchRoute(mode) {
     distance:    r.distance,
     geometry:    r.legs[0]?.steps ?? null,
     geojson:     r.geometry,
+    isTaxi:      mode.isTaxi ?? false,
+    taxiFare:    mode.isTaxi ? estimateTaxiFare(r.distance, r.duration) : null,
   }));
+}
+
+// Israeli taxi meter estimate (2024 rates, day tariff)
+function estimateTaxiFare(distM, durSec) {
+  const base    = 13.0;           // ₪ flagfall
+  const perKm   = 3.8;            // ₪/km
+  const perMin  = 1.1;            // ₪/min when slow
+  const km      = distM / 1000;
+  const minutes = durSec / 60;
+  return Math.round(base + km * perKm + Math.max(0, minutes - km * 2) * perMin);
 }
 
 // Lighten a hex color by amount
@@ -262,17 +284,32 @@ function haversineM(lat1, lng1, lat2, lng2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-async function findNearestStop(lat, lng, osmTag, radius) {
-  const query = `[out:json][timeout:12];node[${osmTag}](around:${radius},${lat},${lng});out body 10;`;
+async function findNearestStop(lat, lng, osmStopTag, radius) {
+  const query = `[out:json][timeout:12];node[${osmStopTag}](around:${radius},${lat},${lng});out body 10;`;
   const res = await fetch(OVERPASS, {
     method: 'POST', body: 'data=' + encodeURIComponent(query),
   });
   const data = await res.json();
   if (!data.elements?.length) return null;
-  // Sort by distance, return closest
   return data.elements.sort((a, b) =>
     haversineM(lat, lng, a.lat, a.lon) - haversineM(lat, lng, b.lat, b.lon)
   )[0];
+}
+
+// Uses Overpass set-intersection to find routes that serve BOTH areas
+async function findConnectingRoute(routeType, fromLat, fromLng, toLat, toLng, radius) {
+  const query = `
+    [out:json][timeout:18];
+    relation["route"="${routeType}"](around:${radius},${fromLat},${fromLng})->.a;
+    relation["route"="${routeType}"](around:${radius},${toLat},${toLng})->.b;
+    relation.a.b;
+    out tags 5;
+  `;
+  try {
+    const res = await fetch(OVERPASS, { method: 'POST', body: 'data=' + encodeURIComponent(query) });
+    const data = await res.json();
+    return data.elements?.[0] ?? null;
+  } catch { return null; }
 }
 
 async function fetchWalkingLeg(from, to) {
@@ -288,9 +325,14 @@ async function fetchTransitRoute(mode) {
   const directDist = haversineM(fromPlace.lat, fromPlace.lng, toPlace.lat, toPlace.lng);
   if (directDist < mode.minDistM) throw new Error('too close for transit');
 
-  const [fromStop, toStop] = await Promise.all([
-    findNearestStop(fromPlace.lat, fromPlace.lng, mode.osmTag, mode.searchRadius),
-    findNearestStop(toPlace.lat, toPlace.lng, mode.osmTag, mode.searchRadius),
+  // Run stop lookup + route-intersection lookup in parallel
+  const [fromStop, toStop, connectingRoute] = await Promise.all([
+    findNearestStop(fromPlace.lat, fromPlace.lng, mode.osmStopTag, mode.searchRadius),
+    findNearestStop(toPlace.lat,   toPlace.lng,   mode.osmStopTag, mode.searchRadius),
+    mode.osmRouteType
+      ? findConnectingRoute(mode.osmRouteType,
+          fromPlace.lat, fromPlace.lng, toPlace.lat, toPlace.lng, mode.searchRadius)
+      : Promise.resolve(null),
   ]);
   if (!fromStop || !toStop) throw new Error('no stops found');
   if (fromStop.id === toStop.id) throw new Error('same stop');
@@ -298,34 +340,51 @@ async function fetchTransitRoute(mode) {
   const transitDistM = haversineM(fromStop.lat, fromStop.lon, toStop.lat, toStop.lon);
   if (transitDistM < 500) throw new Error('stops too close');
 
-  // Walking legs
   const [walk1, walk2] = await Promise.all([
     fetchWalkingLeg(fromPlace, { lat: fromStop.lat, lng: fromStop.lon }),
     fetchWalkingLeg({ lat: toStop.lat, lng: toStop.lon }, toPlace),
   ]);
 
-  const transitSec = (transitDistM / (mode.avgSpeedKmh * 1000 / 3600));
+  const transitSec = transitDistM / (mode.avgSpeedKmh * 1000 / 3600);
   const totalDur   = walk1.duration + mode.waitSec + transitSec + walk2.duration;
   const totalDist  = walk1.distance + transitDistM + walk2.distance;
 
   const fromName = fromStop.tags?.name ?? fromStop.tags?.['name:he'] ?? 'תחנה';
   const toName   = toStop.tags?.name   ?? toStop.tags?.['name:he']   ?? 'תחנה';
 
+  // Extract line info from connecting route if found
+  const rt = connectingRoute?.tags ?? {};
+  const lineRef      = rt.ref      ?? rt.name?.match(/\d+/)?.[0] ?? null;
+  const lineOperator = rt.operator ?? rt.network ?? null;
+  const lineColor    = rt.colour   ?? rt.color   ?? null;
+
+  const transitColor = lineColor ? normalizeOsmColor(lineColor) : mode.color;
+
   return {
-    id: mode.id, label: mode.label, icon: mode.icon, color: mode.color,
-    dashArray: null, isTransit: true,
+    id: mode.id, label: mode.label, icon: mode.icon,
+    color: transitColor, dashArray: null, isTransit: true,
     duration: totalDur, distance: totalDist,
+    lineRef, lineOperator,
     legs: [
-      { type: 'walk',    duration: walk1.duration,   distance: walk1.distance,   geojson: walk1.geojson, toName: fromName },
-      { type: mode.id,   duration: transitSec + mode.waitSec, distance: transitDistM,
-        fromName, toName, waitSec: mode.waitSec,
+      { type: 'walk',   duration: walk1.duration, distance: walk1.distance, geojson: walk1.geojson, toName: fromName },
+      { type: mode.id,  duration: transitSec + mode.waitSec, distance: transitDistM,
+        fromName, toName, waitSec: mode.waitSec, lineRef, lineOperator,
         fromCoord: [fromStop.lat, fromStop.lon],
-        toCoord:   [toStop.lat,   toStop.lon] },
-      { type: 'walk',    duration: walk2.duration,   distance: walk2.distance,   geojson: walk2.geojson, fromName: toName },
+        toCoord:   [toStop.lat,   toStop.lon],
+      },
+      { type: 'walk',   duration: walk2.duration, distance: walk2.distance, geojson: walk2.geojson, fromName: toName },
     ],
-    geojson: null,
-    geometry: null,
+    geojson: null, geometry: null,
   };
+}
+
+function normalizeOsmColor(c) {
+  if (!c) return null;
+  if (c.startsWith('#')) return c;
+  // named colors via a small map
+  const named = { red:'#dc2626', blue:'#2563eb', green:'#16a34a', yellow:'#ca8a04',
+    orange:'#ea580c', purple:'#7c3aed', brown:'#92400e', grey:'#6b7280', gray:'#6b7280' };
+  return named[c.toLowerCase()] ?? null;
 }
 
 async function searchRoutes() {
@@ -466,6 +525,10 @@ function renderRouteCards(routes) {
       </span>`;
     }
 
+    const fareHtml = route.taxiFare
+      ? `<span class="fare-badge">~₪${route.taxiFare}</span>`
+      : '';
+
     card.innerHTML = `
       <div class="mode-icon-large" style="background:${route.color}18">
         <span class="material-icons" style="color:${route.color}">${route.icon}</span>
@@ -479,7 +542,7 @@ function renderRouteCards(routes) {
         <div class="route-steps">${stepsHtml}</div>
         <div class="route-detail-text">
           <span class="material-icons small-icon">straighten</span>
-          ${km} ק"מ
+          ${km} ק"מ${fareHtml}
         </div>
       </div>
     `;
@@ -502,13 +565,16 @@ function buildTransitLegsHtml(route) {
     if (leg.type === 'walk') {
       const label = leg.toName ? `עד ${leg.toName}` : (leg.fromName ? `מ-${leg.fromName}` : '');
       return `<span class="step-chip" style="background:#2f9e44">
-        <span class="material-icons">directions_walk</span>${legMins} דק' ${label}
+        <span class="material-icons">directions_walk</span>${legMins} דק'${label ? ' ' + label : ''}
       </span>`;
     }
-    const waitMins = Math.round(leg.waitSec / 60);
+    const waitMins  = Math.round(leg.waitSec / 60);
+    const rideMins  = Math.round((leg.duration - leg.waitSec) / 60);
+    const lineLabel = leg.lineRef ? `קו ${leg.lineRef}` : route.label;
+    const opLabel   = leg.lineOperator ? ` <span style="opacity:.7;font-size:10px">(${leg.lineOperator})</span>` : '';
     return `<span class="step-chip" style="background:${route.color}">
-        <span class="material-icons">${route.icon}</span>${Math.round((leg.duration - leg.waitSec) / 60)} דק'
-        <span style="opacity:.75;font-size:10px">(המתנה ~${waitMins} דק')</span>
+        <span class="material-icons">${route.icon}</span>${lineLabel}${opLabel}
+        <span style="opacity:.8;font-size:10px">&nbsp;${rideMins} דק' + ~${waitMins} המתנה</span>
       </span>`;
   }).join('<span class="leg-sep">›</span>');
 }
@@ -530,8 +596,10 @@ function filterMode(el, mode) {
 
 // ── Route detail modal ──────────────────────────────────────
 function openRouteModal(route, arrStr, mins, km) {
+  const titleExtra = route.taxiFare ? `  ·  ~₪${route.taxiFare}`
+    : route.lineRef ? `  ·  קו ${route.lineRef}` : '';
   document.getElementById('modalTitle').textContent =
-    `${route.label}  ·  ${mins} דק'  ·  ${km} ק"מ`;
+    `${route.label}  ·  ${mins} דק'  ·  ${km} ק"מ${titleExtra}`;
 
   const steps = route.geometry ?? [];
   let timelineHtml = '';
