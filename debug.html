@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<title>אבחון – מוביט</title>
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  body { font-family: Heebo, sans-serif; margin: 20px; background: #f8fafc; }
+  h1   { font-size: 22px; margin-bottom: 16px; }
+  .test { background: white; border-radius: 10px; padding: 14px 16px; margin-bottom: 10px;
+          border: 1.5px solid #e2e8f0; display: flex; align-items: center; gap: 12px; }
+  .status { font-size: 22px; width: 30px; }
+  .name   { font-weight: 600; font-size: 14px; }
+  .detail { font-size: 12px; color: #64748b; margin-top: 2px; }
+  #mapTest { height: 200px; border-radius: 8px; margin-top: 8px; }
+  .pending { color: #94a3b8; }
+  .ok  { color: #22c55e; }
+  .err { color: #ef4444; }
+</style>
+</head>
+<body>
+<h1>🔍 אבחון חיבורים – מוביט</h1>
+<div id="results"></div>
+<div id="mapTest"></div>
+
+<script>
+const tests = [
+  {
+    name: 'Leaflet נטען',
+    fn: async () => {
+      if (typeof L === 'undefined') throw new Error('L is not defined');
+      return 'גרסה ' + L.version;
+    }
+  },
+  {
+    name: 'Nominatim (geocoding)',
+    fn: async () => {
+      const r = await fetch('https://nominatim.openstreetmap.org/search?q=Tel+Aviv&format=json&limit=1',
+        { headers: { 'Accept-Language': 'he' } });
+      const d = await r.json();
+      if (!d.length) throw new Error('no results');
+      return d[0].display_name.slice(0, 60) + '…';
+    }
+  },
+  {
+    name: 'OSRM נהיגה (router.project-osrm.org)',
+    fn: async () => {
+      const r = await fetch('https://router.project-osrm.org/route/v1/driving/34.78,32.08;35.21,31.77?overview=false');
+      const d = await r.json();
+      if (d.code !== 'Ok') throw new Error(d.code);
+      const km = (d.routes[0].distance / 1000).toFixed(1);
+      return `${km} ק"מ, קוד: ${d.code}`;
+    }
+  },
+  {
+    name: 'OSRM הליכה (routing.openstreetmap.de)',
+    fn: async () => {
+      const r = await fetch('https://routing.openstreetmap.de/routed-foot/route/v1/walking/34.78,32.08;34.80,32.10?overview=false');
+      const d = await r.json();
+      if (d.code !== 'Ok') throw new Error(d.code);
+      return `קוד: ${d.code}, ${Math.round(d.routes[0].duration/60)} דק'`;
+    }
+  },
+  {
+    name: 'OSRM אופניים (routing.openstreetmap.de)',
+    fn: async () => {
+      const r = await fetch('https://routing.openstreetmap.de/routed-bike/route/v1/cycling/34.78,32.08;34.80,32.10?overview=false');
+      const d = await r.json();
+      if (d.code !== 'Ok') throw new Error(d.code);
+      return `קוד: ${d.code}, ${Math.round(d.routes[0].duration/60)} דק'`;
+    }
+  },
+  {
+    name: 'מפה Leaflet (CartoCDN)',
+    fn: async () => {
+      const map = L.map('mapTest').setView([32.08, 34.78], 13);
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+        { subdomains: 'abcd' }).addTo(map);
+      return 'המפה נטענה ✓';
+    }
+  },
+];
+
+const container = document.getElementById('results');
+
+(async () => {
+  for (const t of tests) {
+    const div = document.createElement('div');
+    div.className = 'test';
+    div.innerHTML = `<span class="status pending">⏳</span>
+      <div><div class="name">${t.name}</div><div class="detail" id="d_${t.name}">בודק…</div></div>`;
+    container.appendChild(div);
+
+    try {
+      const res = await t.fn();
+      div.querySelector('.status').textContent = '✅';
+      div.querySelector('.status').className = 'status ok';
+      div.querySelector('.detail').textContent = res;
+    } catch (e) {
+      div.querySelector('.status').textContent = '❌';
+      div.querySelector('.status').className = 'status err';
+      div.querySelector('.detail').textContent = e.message;
+      div.querySelector('.detail').style.color = '#ef4444';
+    }
+  }
+})();
+</script>
+</body>
+</html>
