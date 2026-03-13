@@ -643,6 +643,15 @@ body {
 .mode-icon-large .material-icons { font-size: 22px; }
 
 /* ─────────────────────────────────────────────────────
+   TRANSIT LEGS
+───────────────────────────────────────────────────── */
+.route-steps { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+
+.leg-sep {
+  font-size: 14px; color: var(--text-muted); margin: 0 1px; flex-shrink: 0;
+}
+
+/* ─────────────────────────────────────────────────────
    RESPONSIVE
 ───────────────────────────────────────────────────── */
 @media (min-width: 600px) {

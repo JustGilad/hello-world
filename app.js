@@ -9,12 +9,27 @@ const NOMINATIM   = 'https://nominatim.openstreetmap.org/search';
 const OSRM_DRIVE  = 'https://router.project-osrm.org/route/v1/driving';
 const OSRM_WALK   = 'https://routing.openstreetmap.de/routed-foot/route/v1/walking';
 const OSRM_BIKE   = 'https://routing.openstreetmap.de/routed-bike/route/v1/cycling';
+const OVERPASS    = 'https://overpass-api.de/api/interpreter';
 
-// ── Route mode config ────────────────────────────────────
+// ── Road route mode config ───────────────────────────────
 const MODES = [
-  { id: 'driving', label: 'נהיגה',    icon: 'directions_car',  color: '#2b5ce6', url: OSRM_DRIVE, dashArray: null    },
-  { id: 'walking', label: 'הליכה',    icon: 'directions_walk', color: '#2f9e44', url: OSRM_WALK,  dashArray: '6,5'  },
-  { id: 'cycling', label: 'אופניים',  icon: 'directions_bike', color: '#e67700', url: OSRM_BIKE,  dashArray: null    },
+  { id: 'driving', label: 'נהיגה',    icon: 'directions_car',  color: '#2b5ce6', url: OSRM_DRIVE, dashArray: null   },
+  { id: 'walking', label: 'הליכה',    icon: 'directions_walk', color: '#2f9e44', url: OSRM_WALK,  dashArray: '6,5' },
+  { id: 'cycling', label: 'אופניים',  icon: 'directions_bike', color: '#e67700', url: OSRM_BIKE,  dashArray: null   },
+];
+
+// ── Transit mode config ──────────────────────────────────
+const TRANSIT_MODES = [
+  {
+    id: 'train', label: 'רכבת', icon: 'directions_railway', color: '#7c3aed',
+    osmTag: '"railway"="station"', searchRadius: 6000,
+    avgSpeedKmh: 70, waitSec: 720, minDistM: 8000,
+  },
+  {
+    id: 'tram', label: 'רכבת קלה', icon: 'tram', color: '#0891b2',
+    osmTag: '"railway"="tram_stop"', searchRadius: 2500,
+    avgSpeedKmh: 20, waitSec: 480, minDistM: 1500,
+  },
 ];
 
 // ── State ─────────────────────────────────────────────────
@@ -235,6 +250,84 @@ function shadeColor(hex, amount) {
   return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
 }
 
+// ── Transit helpers ────────────────────────────────────────
+
+function haversineM(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180)
+    * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+async function findNearestStop(lat, lng, osmTag, radius) {
+  const query = `[out:json][timeout:12];node[${osmTag}](around:${radius},${lat},${lng});out body 10;`;
+  const res = await fetch(OVERPASS, {
+    method: 'POST', body: 'data=' + encodeURIComponent(query),
+  });
+  const data = await res.json();
+  if (!data.elements?.length) return null;
+  // Sort by distance, return closest
+  return data.elements.sort((a, b) =>
+    haversineM(lat, lng, a.lat, a.lon) - haversineM(lat, lng, b.lat, b.lon)
+  )[0];
+}
+
+async function fetchWalkingLeg(from, to) {
+  const coords = `${from.lng},${from.lat};${to.lng},${to.lat}`;
+  const res = await fetch(`${OSRM_WALK}/${coords}?overview=full&geometries=geojson&steps=false`);
+  const data = await res.json();
+  if (data.code !== 'Ok' || !data.routes?.length) throw new Error('no walk route');
+  const r = data.routes[0];
+  return { duration: r.duration, distance: r.distance, geojson: r.geometry };
+}
+
+async function fetchTransitRoute(mode) {
+  const directDist = haversineM(fromPlace.lat, fromPlace.lng, toPlace.lat, toPlace.lng);
+  if (directDist < mode.minDistM) throw new Error('too close for transit');
+
+  const [fromStop, toStop] = await Promise.all([
+    findNearestStop(fromPlace.lat, fromPlace.lng, mode.osmTag, mode.searchRadius),
+    findNearestStop(toPlace.lat, toPlace.lng, mode.osmTag, mode.searchRadius),
+  ]);
+  if (!fromStop || !toStop) throw new Error('no stops found');
+  if (fromStop.id === toStop.id) throw new Error('same stop');
+
+  const transitDistM = haversineM(fromStop.lat, fromStop.lon, toStop.lat, toStop.lon);
+  if (transitDistM < 500) throw new Error('stops too close');
+
+  // Walking legs
+  const [walk1, walk2] = await Promise.all([
+    fetchWalkingLeg(fromPlace, { lat: fromStop.lat, lng: fromStop.lon }),
+    fetchWalkingLeg({ lat: toStop.lat, lng: toStop.lon }, toPlace),
+  ]);
+
+  const transitSec = (transitDistM / (mode.avgSpeedKmh * 1000 / 3600));
+  const totalDur   = walk1.duration + mode.waitSec + transitSec + walk2.duration;
+  const totalDist  = walk1.distance + transitDistM + walk2.distance;
+
+  const fromName = fromStop.tags?.name ?? fromStop.tags?.['name:he'] ?? 'תחנה';
+  const toName   = toStop.tags?.name   ?? toStop.tags?.['name:he']   ?? 'תחנה';
+
+  return {
+    id: mode.id, label: mode.label, icon: mode.icon, color: mode.color,
+    dashArray: null, isTransit: true,
+    duration: totalDur, distance: totalDist,
+    legs: [
+      { type: 'walk',    duration: walk1.duration,   distance: walk1.distance,   geojson: walk1.geojson, toName: fromName },
+      { type: mode.id,   duration: transitSec + mode.waitSec, distance: transitDistM,
+        fromName, toName, waitSec: mode.waitSec,
+        fromCoord: [fromStop.lat, fromStop.lon],
+        toCoord:   [toStop.lat,   toStop.lon] },
+      { type: 'walk',    duration: walk2.duration,   distance: walk2.distance,   geojson: walk2.geojson, fromName: toName },
+    ],
+    geojson: null,
+    geometry: null,
+  };
+}
+
 async function searchRoutes() {
   if (!fromPlace || !toPlace) {
     showToast('יש לבחור נקודת מוצא ויעד.');
@@ -252,12 +345,16 @@ async function searchRoutes() {
   clearRouteLines();
   computedRoutes = [];
 
-  // Parallel requests for all 3 modes, each may return multiple alternatives
-  const results = await Promise.allSettled(MODES.map(fetchRoute));
+  // Parallel requests: road modes + transit modes
+  const [roadResults, transitResults] = await Promise.all([
+    Promise.allSettled(MODES.map(fetchRoute)),
+    Promise.allSettled(TRANSIT_MODES.map(fetchTransitRoute)),
+  ]);
 
-  computedRoutes = results
-    .filter(r => r.status === 'fulfilled')
-    .flatMap(r => r.value);   // flatten alternatives into one list
+  computedRoutes = [
+    ...roadResults.filter(r => r.status === 'fulfilled').flatMap(r => r.value),
+    ...transitResults.filter(r => r.status === 'fulfilled').map(r => r.value),
+  ];
 
   btn.classList.remove('loading');
   btn.querySelector('span').textContent = 'search';
@@ -286,31 +383,60 @@ async function searchRoutes() {
 
 // ── Polylines ──────────────────────────────────────────────
 function drawRouteLine(route, active = false) {
-  const coords = route.geojson.coordinates.map(([lng, lat]) => [lat, lng]);
-  const line = L.polyline(coords, {
-    color:     active ? route.color : '#aaa',
-    weight:    active ? 5 : 3,
-    opacity:   active ? .9 : .45,
-    dashArray: route.dashArray,
-  }).addTo(map);
-  routePolylines[route.id] = line;
+  const lines = [];
+
+  if (route.isTransit) {
+    route.legs.forEach(leg => {
+      if ((leg.type === 'walk') && leg.geojson) {
+        const coords = leg.geojson.coordinates.map(([lng, lat]) => [lat, lng]);
+        lines.push(L.polyline(coords, {
+          color: active ? '#2f9e44' : '#aaa', weight: active ? 3 : 2,
+          opacity: active ? .8 : .4, dashArray: '5,5',
+        }).addTo(map));
+      } else if (leg.fromCoord && leg.toCoord) {
+        // Transit leg: thick line between stations
+        lines.push(L.polyline([leg.fromCoord, leg.toCoord], {
+          color: active ? route.color : '#aaa', weight: active ? 5 : 3,
+          opacity: active ? .9 : .4,
+        }).addTo(map));
+        // Station markers
+        if (active) {
+          [leg.fromCoord, leg.toCoord].forEach(c =>
+            lines.push(L.circleMarker(c, { radius: 6, color: route.color, fillColor: 'white', fillOpacity: 1, weight: 2 }).addTo(map))
+          );
+        }
+      }
+    });
+  } else {
+    const coords = route.geojson.coordinates.map(([lng, lat]) => [lat, lng]);
+    lines.push(L.polyline(coords, {
+      color:     active ? route.color : '#aaa',
+      weight:    active ? 5 : 3,
+      opacity:   active ? .9 : .45,
+      dashArray: route.dashArray,
+    }).addTo(map));
+  }
+
+  routePolylines[route.id] = lines;
 }
 
 function highlightRoute(id) {
   computedRoutes.forEach(r => {
-    const line = routePolylines[r.id];
-    if (!line) return;
-    if (r.id === id) {
-      line.setStyle({ color: r.color, weight: 5, opacity: .9, dashArray: r.dashArray });
-      line.bringToFront();
-    } else {
-      line.setStyle({ color: '#aaa', weight: 3, opacity: .45 });
-    }
+    const lines = routePolylines[r.id];
+    if (!lines?.length) return;
+    const active = r.id === id;
+    lines.forEach(line => {
+      if (line.bringToFront && active) line.bringToFront();
+    });
+    // Redraw by removing and re-adding
+    lines.forEach(l => map.removeLayer(l));
+    routePolylines[r.id] = [];
+    drawRouteLine(r, active);
   });
 }
 
 function clearRouteLines() {
-  Object.values(routePolylines).forEach(l => map.removeLayer(l));
+  Object.values(routePolylines).forEach(lines => lines.forEach(l => map.removeLayer(l)));
   routePolylines = {};
 }
 
@@ -331,21 +457,26 @@ function renderRouteCards(routes) {
     card.dataset.id = route.id;
     if (i === 0) card.classList.add('best');
 
+    let stepsHtml;
+    if (route.isTransit) {
+      stepsHtml = buildTransitLegsHtml(route);
+    } else {
+      stepsHtml = `<span class="step-chip" style="background:${route.color}">
+        <span class="material-icons">${route.icon}</span>${route.label}
+      </span>`;
+    }
+
     card.innerHTML = `
       <div class="mode-icon-large" style="background:${route.color}18">
         <span class="material-icons" style="color:${route.color}">${route.icon}</span>
       </div>
       <div class="route-time-block">
-        <div class="route-duration">${mins}<span>min</span></div>
-        <div class="route-arrive">Arrive ${arrStr}</div>
+        <div class="route-duration">${mins}<span>דק'</span></div>
+        <div class="route-arrive">הגעה ${arrStr}</div>
       </div>
       <div class="route-divider"></div>
       <div class="route-info">
-        <div class="route-steps">
-          <span class="step-chip" style="background:${route.color}">
-            <span class="material-icons">${route.icon}</span>${route.label}
-          </span>
-        </div>
+        <div class="route-steps">${stepsHtml}</div>
         <div class="route-detail-text">
           <span class="material-icons small-icon">straighten</span>
           ${km} ק"מ
@@ -364,6 +495,24 @@ function renderRouteCards(routes) {
   });
 }
 
+// ── Transit legs HTML ───────────────────────────────────────
+function buildTransitLegsHtml(route) {
+  return route.legs.map(leg => {
+    const legMins = Math.round(leg.duration / 60);
+    if (leg.type === 'walk') {
+      const label = leg.toName ? `עד ${leg.toName}` : (leg.fromName ? `מ-${leg.fromName}` : '');
+      return `<span class="step-chip" style="background:#2f9e44">
+        <span class="material-icons">directions_walk</span>${legMins} דק' ${label}
+      </span>`;
+    }
+    const waitMins = Math.round(leg.waitSec / 60);
+    return `<span class="step-chip" style="background:${route.color}">
+        <span class="material-icons">${route.icon}</span>${Math.round((leg.duration - leg.waitSec) / 60)} דק'
+        <span style="opacity:.75;font-size:10px">(המתנה ~${waitMins} דק')</span>
+      </span>`;
+  }).join('<span class="leg-sep">›</span>');
+}
+
 // ── Filter (show/hide cards by mode) ──────────────────────
 function filterMode(el, mode) {
   document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
@@ -371,10 +520,10 @@ function filterMode(el, mode) {
   activeMode = mode;
 
   document.querySelectorAll('.route-card').forEach(card => {
-    card.style.display = (mode === 'all' || card.dataset.id === mode) ? '' : 'none';
+    const match = mode === 'all' || card.dataset.id === mode || card.dataset.id.startsWith(mode + '_');
+    card.style.display = match ? '' : 'none';
   });
 
-  // Also highlight the visible route on the map
   if (mode !== 'all') highlightRoute(mode);
   else if (computedRoutes.length) highlightRoute(computedRoutes[0].id);
 }
@@ -387,7 +536,39 @@ function openRouteModal(route, arrStr, mins, km) {
   const steps = route.geometry ?? [];
   let timelineHtml = '';
 
-  if (steps.length) {
+  if (route.isTransit) {
+    const now = getDepartureTime();
+    let elapsed = 0;
+    timelineHtml = route.legs.map(leg => {
+      const t = new Date(now.getTime() + elapsed * 1000);
+      elapsed += leg.duration;
+      const tStr = t.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const legMins = Math.round(leg.duration / 60);
+      const legKm = (leg.distance / 1000).toFixed(1);
+      if (leg.type === 'walk') {
+        return `<div class="timeline-step">
+          <div class="timeline-dot" style="color:#2f9e44"></div>
+          <div class="timeline-step-header">
+            <span class="timeline-step-badge" style="background:#2f9e44">הליכה</span>
+            <span class="timeline-step-label">${leg.toName ? `עד ${leg.toName}` : leg.fromName ? `מ-${leg.fromName}` : 'הליכה'}</span>
+            <span class="timeline-step-time">${tStr}</span>
+          </div>
+          <div class="timeline-step-sub">${legKm} ק"מ · ~${legMins} דק'</div>
+        </div>`;
+      }
+      const waitMins = Math.round(leg.waitSec / 60);
+      const rideMins = Math.round((leg.duration - leg.waitSec) / 60);
+      return `<div class="timeline-step">
+        <div class="timeline-dot" style="color:${route.color}"></div>
+        <div class="timeline-step-header">
+          <span class="timeline-step-badge" style="background:${route.color}">${route.label}</span>
+          <span class="timeline-step-label">${leg.fromName} → ${leg.toName}</span>
+          <span class="timeline-step-time">${tStr}</span>
+        </div>
+        <div class="timeline-step-sub">${legKm} ק"מ · נסיעה ${rideMins} דק' + המתנה ~${waitMins} דק'</div>
+      </div>`;
+    }).join('');
+  } else if (steps.length) {
     const now = getDepartureTime();
     let elapsed = 0;
     timelineHtml = steps
